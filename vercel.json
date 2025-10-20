@@ -1,0 +1,8 @@
+{
+    "functions": { "api/*": { "runtime": "@vercel/node@3.2.0", "maxDuration": 10 } },
+    "routes": [
+      { "src": "^/api/(.*)$", "dest": "/api/$1" },
+      { "src": "/(.*)", "dest": "/client/dist/$1" }
+    ]
+  }
+  

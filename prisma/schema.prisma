@@ -1,0 +1,48 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Operator {
+  gt
+  lt
+}
+
+model User {
+  id    String @id @default(cuid())
+  phone String @unique
+  rules Rule[]
+}
+
+model Rule {
+  id          Int       @id @default(autoincrement())
+  user        User      @relation(fields: [userId], references: [id])
+  userId      String
+  lat         Float
+  lon         Float
+  op          Operator
+  threshold_c Float
+  active      Boolean   @default(true)
+  lastChecked DateTime?
+  alerts      Alert[]
+
+  @@index([active])
+}
+
+model Alert {
+  id              Int       @id @default(autoincrement())
+  rule            Rule      @relation(fields: [ruleId], references: [id])
+  ruleId          Int
+  triggered_at    DateTime  @default(now())
+  value_c         Float
+  acknowledged_at DateTime?
+  ack_from_phone  String?
+
+  @@index([ruleId, acknowledged_at])
+}
