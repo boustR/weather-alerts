@@ -71,26 +71,38 @@ export default async function handler(_req: VercelRequest, res: VercelResponse) 
         continue;
       }
 
-      // Create alert
-      const alert = await prisma.alert.create({
-        data: { ruleId: rule.id, value_c: temp! },
-      });
-      fired++;
-      info.alertId = alert.id; // helpful in response
+      // Create alert + send SMS with rollback if SMS fails
+      let alertId: number | undefined;
+      try {
+        const alert = await prisma.alert.create({
+          data: { ruleId: rule.id, value_c: temp! },
+        });
+        alertId = alert.id;
 
-      // Send SMS
-      const body = `ALERT rule ${rule.id}: ${temp!.toFixed(1)}°C. Reply "ACK ${alert.id}" to acknowledge.`;
-      await twilioClient.messages.create({
-        to: rule.user.phone,
-        from: process.env.TWILIO_FROM_NUMBER!,
-        body,
-      });
+        const body = `ALERT rule ${rule.id}: ${temp!.toFixed(1)}°C. Reply "ACK ${alert.id}" to acknowledge.`;
+        await twilioClient.messages.create({
+          to: rule.user.phone,
+          from: process.env.TWILIO_FROM_NUMBER!,
+          body,
+        });
 
-      // Track last check
-      await prisma.rule.update({
-        where: { id: rule.id },
-        data: { lastChecked: new Date() },
-      });
+        fired++;
+
+        await prisma.rule.update({
+          where: { id: rule.id },
+          data: { lastChecked: new Date() },
+        });
+
+        info.alertId = alertId; // include id in response details
+      } catch (err) {
+        // SMS failed — delete the open alert so future runs can try again
+        if (alertId) {
+          await prisma.alert.delete({ where: { id: alertId } }).catch(() => {});
+        }
+        // Optional: record the error somewhere (e.g., a log/monitor)
+        details.push(info);
+        continue; // move on to next rule
+      }
 
       details.push(info);
     }
