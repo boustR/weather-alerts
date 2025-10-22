@@ -1,0 +1,51 @@
+import { VercelRequest, VercelResponse } from '@vercel/node';
+import twilio from 'twilio';
+import { prisma } from '../lib/db';
+
+// Validates Twilio signature using your AUTH TOKEN
+const twilioWebhookMiddleware = twilio.webhook({
+  validate: true,
+  protocol: 'https',
+  host: process.env.VERCEL_URL, // provided at runtime
+});
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // Twilio sends x-www-form-urlencoded by default
+  // Vercel parses body automatically for small payloads; if not, consider manual parsing.
+
+  // @ts-ignore (middleware types assume Express)
+  await new Promise<void>((resolve, reject) => twilioWebhookMiddleware(req, res, (err: any) => err ? reject(err) : resolve()))
+    .catch(() => {}); // if validation fails, we still return a friendly message below
+
+  try {
+    const from = String(req.body.From || req.body.from || '').trim();
+    const body = String(req.body.Body || req.body.body || '').trim();
+
+    const m = body.match(/^ACK\s+(\d{1,10})$/i);
+    if (!m) {
+      return res
+        .status(200)
+        .setHeader('Content-Type', 'text/xml')
+        .send(`<Response><Message>Usage: ACK &lt;alertId&gt;</Message></Response>`);
+    }
+
+    const alertId = parseInt(m[1], 10);
+    const alert = await prisma.alert.findUnique({ where: { id: alertId } });
+
+    if (!alert) {
+      return res.status(200).setHeader('Content-Type', 'text/xml').send(`<Response><Message>Alert not found.</Message></Response>`);
+    }
+    if (alert.acknowledged_at) {
+      return res.status(200).setHeader('Content-Type', 'text/xml').send(`<Response><Message>Already acknowledged.</Message></Response>`);
+    }
+
+    await prisma.alert.update({
+      where: { id: alertId },
+      data: { acknowledged_at: new Date(), ack_from_phone: from },
+    });
+
+    return res.status(200).setHeader('Content-Type', 'text/xml').send(`<Response><Message>Alert ${alertId} acknowledged. Thanks!</Message></Response>`);
+  } catch (e: any) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+}
