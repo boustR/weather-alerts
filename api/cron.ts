@@ -9,13 +9,11 @@ async function getCurrentTemp(lat: number, lon: number): Promise<number | null> 
   const res = await fetch(url);
   if (!res.ok) return null;
   const data = await res.json();
-  // °C
-  return data?.current_weather?.temperature ?? null;
+  return data?.current_weather?.temperature ?? null; // °C
 }
 
 export default async function handler(_req: VercelRequest, res: VercelResponse) {
   try {
-    // 1) Helpful guard for misconfigured env
     if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_FROM_NUMBER) {
       return res.status(500).json({ ok: false, error: 'Missing Twilio env vars' });
     }
@@ -34,15 +32,20 @@ export default async function handler(_req: VercelRequest, res: VercelResponse) 
       threshold_c: number;
       temp: number | null;
       fire: boolean;
+      openAlertId?: number;
       alertId?: number;
+      twilioError?: string;
     }> = [];
 
     for (const rule of rules) {
       processed++;
 
       const temp = await getCurrentTemp(rule.lat, rule.lon);
+      const fire =
+        temp != null &&
+        ((rule.op === 'gt' && temp > rule.threshold_c) ||
+         (rule.op === 'lt' && temp < rule.threshold_c));
 
-      // Collect per-rule debug info (before we possibly continue)
       const info: (typeof details)[number] = {
         ruleId: rule.id,
         lat: rule.lat,
@@ -50,28 +53,24 @@ export default async function handler(_req: VercelRequest, res: VercelResponse) 
         op: rule.op,
         threshold_c: rule.threshold_c,
         temp,
-        fire: temp != null &&
-            ((rule.op === 'gt' && temp > rule.threshold_c) ||
-                (rule.op === 'lt' && temp < rule.threshold_c)),
+        fire,
       };
 
-      if (!(temp != null &&
-          ((rule.op === 'gt' && temp > rule.threshold_c) ||
-              (rule.op === 'lt' && temp < rule.threshold_c)))) {
+      if (!fire) {
         details.push(info);
         continue;
       }
 
-      // Avoid duplicate open alerts
+      // Skip duplicates if there's already an open alert
       const openAlert = await prisma.alert.findFirst({
         where: { ruleId: rule.id, acknowledged_at: null },
       });
       if (openAlert) {
-        details.push(info); // still record the state
+        info.openAlertId = openAlert.id;
+        details.push(info);
         continue;
       }
 
-      // Create alert + send SMS with rollback if SMS fails
       let alertId: number | undefined;
       try {
         const alert = await prisma.alert.create({
@@ -87,21 +86,18 @@ export default async function handler(_req: VercelRequest, res: VercelResponse) 
         });
 
         fired++;
+        info.alertId = alertId;
 
         await prisma.rule.update({
           where: { id: rule.id },
           data: { lastChecked: new Date() },
         });
-
-        info.alertId = alertId; // include id in response details
-      } catch (err) {
-        // SMS failed — delete the open alert so future runs can try again
+      } catch (err: any) {
+        // Roll back the alert so future runs can try again
         if (alertId) {
           await prisma.alert.delete({ where: { id: alertId } }).catch(() => {});
         }
-        // Optional: record the error somewhere (e.g., a log/monitor)
-        details.push(info);
-        continue; // move on to next rule
+        info.twilioError = err?.message || String(err);
       }
 
       details.push(info);
